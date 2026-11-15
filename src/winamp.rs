@@ -145,9 +145,9 @@ impl PlaylistHistory {
     /// Observe the player once per frame. Returns true when a finished or
     /// skipped track was added to the history.
     pub fn observe(&mut self, now: Option<&NowPlaying>) -> bool {
-        let Some(now) = now.filter(|now| {
-            !now.uri.is_empty() && !now.is_episode && !now.loading && !now.resuming
-        }) else {
+        let Some(now) = now
+            .filter(|now| !now.uri.is_empty() && !now.is_episode && !now.loading && !now.resuming)
+        else {
             return false;
         };
 
@@ -164,7 +164,11 @@ impl PlaylistHistory {
                 || (observed.track.duration_ms == 0 && now.duration_ms > 0)
                 || (observed.track.album_id.is_none() && now.album_id.is_some())
                 || (observed.track.artist_id.is_none()
-                    && now.artists.first().and_then(|artist| artist.id.as_ref()).is_some());
+                    && now
+                        .artists
+                        .first()
+                        .and_then(|artist| artist.id.as_ref())
+                        .is_some());
             if needs_refresh {
                 observed.track = Arc::new(PlaylistHistoryTrack::from_now_playing(now));
             }

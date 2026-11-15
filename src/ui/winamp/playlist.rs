@@ -283,7 +283,9 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
     };
     let queued: &[PlayableItem] = queue.map(|queue| queue.queue.as_slice()).unwrap_or(&[]);
     let mut rows = Vec::with_capacity(
-        app.winamp.playlist_history.entries.len() + queued.len() + if now.is_some() { 1 } else { 0 },
+        app.winamp.playlist_history.entries.len()
+            + queued.len()
+            + if now.is_some() { 1 } else { 0 },
     );
 
     // The session history is newest first and sits above the live queue.
