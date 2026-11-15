@@ -196,6 +196,23 @@ jobs:
           $headers = & dumpbin /headers target\debug\spotifast.exe | Out-String
           if ($headers -notmatch $machine) { throw "spotifast.exe is not built for $env:RUNNER_ARCH`:`n$headers" }
 
+      # Keep an optimized x64 executable available from pull-request CI,
+      # without making a release or publishing an installer.
+      - name: Release Windows executable
+        if: runner.os == 'Windows' && runner.arch == 'X64'
+        shell: pwsh
+        run: |
+          mbx build --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows executable
+        if: runner.os == 'Windows' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: spotifast-windows-x64
+          path: target\release\spotifast.exe
+          if-no-files-found: error
+
       - name: Windows installer syntax and renamed inputs
         if: runner.os == 'Windows'
         shell: pwsh

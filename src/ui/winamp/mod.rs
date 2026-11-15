@@ -350,6 +350,8 @@ impl View<'_> {
 /// The whole window, drawn into the root.
 pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
+    let now = app.now_playing();
+    app.winamp.observe_playlist_track(now.as_ref());
     if app.winamp.skin.wmp.is_some() {
         wmp::show(app, ui);
         return;
@@ -365,7 +367,6 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     let textures = app.winamp.textures(&ctx);
     let skin = app.winamp.skin.clone();
-    let now = app.now_playing();
     let time = ctx.input(|input| input.time);
     let shaded = app.settings.winamp_shaded;
     let mask = if shaded {

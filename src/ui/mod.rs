@@ -38,6 +38,8 @@ use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
+    let now = app.now_playing();
+    app.winamp.observe_playlist_track(now.as_ref());
     let ctx = &ctx;
     keys::handle(app, ctx);
     for path in winamp::dropped_skins(ctx) {

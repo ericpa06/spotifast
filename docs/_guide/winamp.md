@@ -152,9 +152,11 @@ music playing on this computer.
 
 ## Playlist
 
-**PL** opens the playlist below the player. It shows the playing song followed
-by the queue. Double-click a song to play it, Ctrl-click to select several, and
-drag the lower-right corner to resize the window. Use X or **PL** to close it.
+**PL** opens the playlist below the player. It shows tracks played earlier
+in this Spotifast session (up to 10,000, newest first), followed by the playing
+song and the upcoming queue. Double-click an earlier track to play it again.
+Double-click a queued song to play it, Ctrl-click to select several, and drag
+the lower-right corner to resize the window. Use X or **PL** to close it.
 
 - **ADD** opens search or Liked Songs.
 - **SEL** selects rows.
