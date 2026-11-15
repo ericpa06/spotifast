@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::app::NowPlaying;
 use crate::settings::Settings;
 use crate::skin::{Sheet, Skin, SkinError};
 use crate::vis::{Analyser, AudioTap};
@@ -100,6 +101,96 @@ struct WmpTexture {
 /// The most a skin's pictures may take on the graphics card, in bytes.
 const MAX_WMP_TEXTURES: usize = 192 * 1024 * 1024;
 
+/// Maximum number of previously played tracks kept in one application session.
+pub const PLAYLIST_HISTORY_LIMIT: usize = 10_000;
+
+/// The small amount of track metadata the Winamp playlist needs to remember.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistHistoryTrack {
+    pub uri: String,
+    pub title: String,
+    pub subtitle: String,
+    pub duration_ms: u32,
+    pub album_id: Option<String>,
+    pub artist_id: Option<String>,
+}
+
+impl PlaylistHistoryTrack {
+    fn from_now_playing(now: &NowPlaying) -> Self {
+        Self {
+            uri: now.uri.clone(),
+            title: now.title.clone(),
+            subtitle: now.subtitle.clone(),
+            duration_ms: now.duration_ms,
+            album_id: now.album_id.clone(),
+            artist_id: now.artists.first().and_then(|artist| artist.id.clone()),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct PlaylistHistory {
+    /// Most recently played first. The current song and upcoming queue are
+    /// deliberately kept outside this history.
+    pub entries: VecDeque<Arc<PlaylistHistoryTrack>>,
+    observed: Option<ObservedPlaylistTrack>,
+}
+
+struct ObservedPlaylistTrack {
+    track: Arc<PlaylistHistoryTrack>,
+    played: bool,
+}
+
+impl PlaylistHistory {
+    /// Observe the player once per frame. Returns true when a finished or
+    /// skipped track was added to the history.
+    pub fn observe(&mut self, now: Option<&NowPlaying>) -> bool {
+        let Some(now) = now.filter(|now| {
+            !now.uri.is_empty() && !now.is_episode && !now.loading && !now.resuming
+        }) else {
+            return false;
+        };
+
+        let next = Arc::new(PlaylistHistoryTrack::from_now_playing(now));
+        let played = now.playing || now.position_ms > 0;
+
+        if let Some(observed) = &mut self.observed
+            && observed.track.uri == next.uri
+        {
+            observed.played |= played;
+            let needs_refresh = (observed.track.title.is_empty() && !next.title.is_empty())
+                || (observed.track.subtitle.is_empty() && !next.subtitle.is_empty())
+                || (observed.track.duration_ms == 0 && next.duration_ms > 0)
+                || (observed.track.album_id.is_none() && next.album_id.is_some())
+                || (observed.track.artist_id.is_none() && next.artist_id.is_some());
+            if needs_refresh {
+                observed.track = next;
+            }
+            return false;
+        }
+
+        let added = if let Some(previous) = self.observed.take() {
+            if previous.played {
+                self.entries.push_front(previous.track);
+                while self.entries.len() > PLAYLIST_HISTORY_LIMIT {
+                    self.entries.pop_back();
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        self.observed = Some(ObservedPlaylistTrack {
+            track: next,
+            played,
+        });
+        added
+    }
+}
+
 pub struct WinampState {
     /// The skin on screen.
     pub skin: Arc<Skin>,
@@ -159,6 +250,7 @@ pub struct WinampState {
     pub eq: crate::eq::SharedEq,
     /// The playlist window: its first visible row, the row clicked, the
     /// wheel's leftover, and the corner drag's leftover.
+    pub playlist_history: PlaylistHistory,
     pub playlist_scroll: usize,
     /// The rows selected, by URI; Ctrl-click adds and removes, SEL has
     /// the rest.
@@ -210,6 +302,7 @@ impl WinampState {
             tap,
             analyser: Analyser::default(),
             eq,
+            playlist_history: PlaylistHistory::default(),
             playlist_scroll: 0,
             playlist_selection: std::collections::HashSet::new(),
             playlist_wheel: 0.0,
@@ -217,6 +310,14 @@ impl WinampState {
             milkdrop_resize: 0.0,
             playlist_text: crate::ui::winamp::PixelText::default(),
             presets: crate::milkdrop::Presets::new(),
+        }
+    }
+
+    /// Remember a completed track and keep the newest history row visible.
+    pub fn observe_playlist_track(&mut self, now: Option<&NowPlaying>) {
+        if self.playlist_history.observe(now) {
+            self.playlist_scroll = 0;
+            self.playlist_selection.clear();
         }
     }
 
@@ -766,5 +867,97 @@ mod tests {
             pick_another(&[], &Some("gone".into()), &mut rng),
             Some("gone".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod playlist_history_tests {
+    use super::*;
+
+    fn now_playing(uri: &str) -> NowPlaying {
+        NowPlaying {
+            local: true,
+            device_name: None,
+            device_kind: None,
+            uri: uri.to_string(),
+            id: None,
+            title: format!("Title {uri}"),
+            artists: Vec::new(),
+            subtitle: "Artist".to_string(),
+            album_name: "Album".to_string(),
+            album_id: None,
+            show_id: None,
+            art_url: None,
+            art_small: None,
+            duration_ms: 180_000,
+            position_ms: 1_000,
+            playing: true,
+            loading: false,
+            shuffle: false,
+            repeat: crate::player::RepeatMode::Off,
+            volume_percent: 70,
+            can_control: true,
+            can_set_volume: true,
+            is_episode: false,
+            resuming: false,
+        }
+    }
+
+    #[test]
+    fn history_is_newest_first_and_keeps_at_most_ten_thousand_tracks() {
+        let mut history = PlaylistHistory::default();
+        let mut current = now_playing("spotify:track:0");
+        assert!(!history.observe(Some(&current)));
+
+        for index in 1..=10_005 {
+            current.uri = format!("spotify:track:{index}");
+            current.title = format!("Title {index}");
+            assert!(history.observe(Some(&current)));
+        }
+
+        assert_eq!(history.entries.len(), PLAYLIST_HISTORY_LIMIT);
+        assert_eq!(
+            history.entries.front().map(|track| track.uri.as_str()),
+            Some("spotify:track:10004")
+        );
+        assert_eq!(
+            history.entries.back().map(|track| track.uri.as_str()),
+            Some("spotify:track:5")
+        );
+    }
+
+    #[test]
+    fn loading_previews_resumed_tracks_and_episodes_are_not_recorded() {
+        let mut history = PlaylistHistory::default();
+        let mut preview = now_playing("spotify:track:preview");
+        preview.loading = true;
+        assert!(!history.observe(Some(&preview)));
+        preview.loading = false;
+        preview.resuming = true;
+        assert!(!history.observe(Some(&preview)));
+        preview.resuming = false;
+        preview.is_episode = true;
+        assert!(!history.observe(Some(&preview)));
+        assert!(history.entries.is_empty());
+
+        preview.is_episode = false;
+        assert!(!history.observe(Some(&preview)));
+        let next = now_playing("spotify:track:next");
+        assert!(history.observe(Some(&next)));
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].uri, "spotify:track:preview");
+    }
+
+    #[test]
+    fn a_track_that_never_started_is_not_added_to_history() {
+        let mut history = PlaylistHistory::default();
+        let mut skipped = now_playing("spotify:track:skipped");
+        skipped.playing = false;
+        skipped.position_ms = 0;
+        assert!(!history.observe(Some(&skipped)));
+
+        let next = now_playing("spotify:track:next");
+        assert!(!history.observe(Some(&next)));
+        assert!(history.entries.is_empty());
     }
 }

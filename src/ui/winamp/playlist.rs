@@ -5,6 +5,8 @@
 //! controls remain decorative. The panel shares the mini-player window so the
 //! two parts stay attached.
 
+use std::sync::Arc;
+
 use egui::{Color32, Sense};
 
 use crate::api::models::PlayableItem;
@@ -14,20 +16,19 @@ use crate::model::{Action, Page, RowContext};
 use crate::skin::layout::{self, Area};
 use crate::skin::sprites;
 use crate::util;
+use crate::winamp::PlaylistHistoryTrack;
 
 use super::View;
 
-/// One line of the list.
+/// One line of the list. History rows share their track metadata through an
+/// Arc, so displaying 10,000 earlier tracks does not clone 10,000 titles.
 struct Row {
-    uri: String,
-    label: String,
-    duration_ms: u32,
+    track: Arc<PlaylistHistoryTrack>,
     current: bool,
     /// Where the song sits in the queue, when it is queued rather than on.
     queued: Option<usize>,
-    /// The pages the MISC menu can open for it.
-    album_id: Option<String>,
-    artist_id: Option<String>,
+    /// A previous track can be played again; the current row cannot.
+    history: bool,
 }
 
 /// The whole panel, `height` skin pixels tall, drawn into a view whose
@@ -280,7 +281,22 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
         ),
         _ => (None, None),
     };
-    let mut rows = Vec::new();
+    let queued: &[PlayableItem] = queue.map(|queue| queue.queue.as_slice()).unwrap_or(&[]);
+    let mut rows = Vec::with_capacity(
+        app.winamp.playlist_history.entries.len() + queued.len() + if now.is_some() { 1 } else { 0 },
+    );
+
+    // The session history is newest first and sits above the live queue.
+    // Arc clones keep this 10,000-row view cheap to assemble each frame.
+    for track in &app.winamp.playlist_history.entries {
+        rows.push(Row {
+            track: Arc::clone(track),
+            current: false,
+            queued: None,
+            history: true,
+        });
+    }
+
     // The queue arrives over the Web API and lags a double-click by a
     // round trip; what the player says is on right now wins, and a queued
     // copy of that song is left out until the fetched queue catches up.
@@ -290,26 +306,34 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
     if let Some(item) = current {
         let (album_id, artist_id) = ids(item);
         rows.push(Row {
-            uri: item.uri().to_string(),
-            label: label(1, &item.subtitle(), item.name()),
-            duration_ms: item.duration_ms(),
+            track: Arc::new(PlaylistHistoryTrack {
+                uri: item.uri().to_string(),
+                title: item.name().to_string(),
+                subtitle: item.subtitle(),
+                duration_ms: item.duration_ms(),
+                album_id,
+                artist_id,
+            }),
             current: true,
             queued: None,
-            album_id,
-            artist_id,
+            history: false,
         });
     } else if let Some(now) = now {
         rows.push(Row {
-            uri: now.uri.clone(),
-            label: label(1, &now.subtitle, &now.title),
-            duration_ms: now.duration_ms,
+            track: Arc::new(PlaylistHistoryTrack {
+                uri: now.uri.clone(),
+                title: now.title.clone(),
+                subtitle: now.subtitle.clone(),
+                duration_ms: now.duration_ms,
+                album_id: now.album_id.clone(),
+                artist_id: now.artists.first().and_then(|artist| artist.id.clone()),
+            }),
             current: true,
             queued: None,
-            album_id: now.album_id.clone(),
-            artist_id: now.artists.first().and_then(|artist| artist.id.clone()),
+            history: false,
         });
     }
-    let queued: &[PlayableItem] = queue.map(|queue| queue.queue.as_slice()).unwrap_or(&[]);
+
     let stale = current.is_none() && queue.is_some();
     let mut skipped_playing = false;
     for (index, item) in queued.iter().enumerate() {
@@ -319,15 +343,20 @@ fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
         }
         let (album_id, artist_id) = ids(item);
         rows.push(Row {
-            uri: item.uri().to_string(),
-            label: label(rows.len() + 1, &item.subtitle(), item.name()),
-            duration_ms: item.duration_ms(),
+            track: Arc::new(PlaylistHistoryTrack {
+                uri: item.uri().to_string(),
+                title: item.name().to_string(),
+                subtitle: item.subtitle(),
+                duration_ms: item.duration_ms(),
+                album_id,
+                artist_id,
+            }),
             current: false,
             queued: Some(index),
-            album_id,
-            artist_id,
+            history: false,
         });
     }
+
     let uris = queued.iter().map(|item| item.uri().to_string()).collect();
     (rows, uris)
 }
@@ -438,14 +467,21 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
                 selection.insert(index);
             }
         }
-        if response.double_clicked()
-            && let Some(index) = row.queued
-        {
-            app.actions.push(Action::PlayFromRow {
-                context: RowContext::Queue,
-                uri: row.uri.clone(),
-                index: index as u32,
-            });
+        if response.double_clicked() {
+            if let Some(index) = row.queued {
+                app.actions.push(Action::PlayFromRow {
+                    context: RowContext::Queue,
+                    uri: row.track.uri.clone(),
+                    index: index as u32,
+                });
+            } else if row.history {
+                let uri = row.track.uri.clone();
+                app.actions.push(Action::PlayFromRow {
+                    context: RowContext::Uris(vec![uri.clone()].into()),
+                    uri,
+                    index: 0,
+                });
+            }
         }
         if app.winamp.playlist_selection.contains(&(scroll + offset)) {
             painter.rect_filled(rect, 0.0, rgb(style.selected_background));
@@ -456,10 +492,11 @@ fn list(app: &mut App, view: &mut View, rows: &[Row], height: u32) {
             style.normal
         });
         let text = &mut app.winamp.playlist_text;
-        let duration = util::format_duration_ms(row.duration_ms);
+        let duration = util::format_duration_ms(row.track.duration_ms);
         let duration_width = text.width(&duration).ceil() as u32;
         let title_room = line.width.saturating_sub(3 * pad + duration_width);
-        let title = fit(text, &row.label, title_room as f32);
+        let row_label = label(scroll + offset + 1, &row.track.subtitle, &row.track.title);
+        let title = fit(text, &row_label, title_room as f32);
         let duration_line = text.line(&ctx, &duration);
         let duration_at = Area::new(
             line.x + line.width - pad - duration_line.width,
@@ -591,12 +628,12 @@ fn grip(app: &mut App, view: &mut View, height: u32) {
 /// skin's small font.
 fn times(app: &App, view: &mut View, now: Option<&NowPlaying>, rows: &[Row], height: u32) {
     let bottom = height - layout::PLAYLIST_BOTTOM_HEIGHT;
-    let total: u32 = rows.iter().map(|row| row.duration_ms).sum();
+    let total: u32 = rows.iter().map(|row| row.track.duration_ms).sum();
     let selected: u32 = rows
         .iter()
         .enumerate()
         .filter(|(index, _)| app.winamp.playlist_selection.contains(index))
-        .map(|(_, row)| row.duration_ms)
+        .map(|(_, row)| row.track.duration_ms)
         .sum();
     let running = format!(
         "{}/{}",
@@ -663,7 +700,7 @@ fn rem_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row]) {
         .iter()
         .enumerate()
         .filter(|(row, _)| app.winamp.playlist_selection.contains(row))
-        .filter_map(|(_, row)| row.queued.map(|index| (index, row.uri.clone())))
+        .filter_map(|(_, row)| row.queued.map(|index| (index, row.track.uri.clone())))
         .filter(|(index, _)| app.can_remove_from_queue(*index))
         .collect();
     let mut remove = ui.add_enabled(
@@ -736,13 +773,13 @@ fn misc_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row]) {
         );
         return;
     };
-    if let Some(album) = &row.album_id
+    if let Some(album) = &row.track.album_id
         && ui.button(gettext(locale, "Song info").as_ref()).clicked()
     {
         app.actions.push(Action::Open(Page::Album(album.clone())));
         app.actions.push(Action::ToggleWinampWindow);
     }
-    if let Some(artist) = &row.artist_id
+    if let Some(artist) = &row.track.artist_id
         && ui.button(gettext(locale, "Artist").as_ref()).clicked()
     {
         app.actions.push(Action::Open(Page::Artist(artist.clone())));
@@ -801,7 +838,7 @@ fn list_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row], queue_uris: &[Strin
         let mut uris: Vec<String> = rows
             .iter()
             .filter(|row| row.current)
-            .map(|row| row.uri.clone())
+            .map(|row| row.track.uri.clone())
             .collect();
         uris.extend(queue_uris.iter().cloned());
         app.actions.push(Action::CreatePlaylist {
