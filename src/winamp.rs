@@ -151,24 +151,27 @@ impl PlaylistHistory {
             return false;
         };
 
-        let next = Arc::new(PlaylistHistoryTrack::from_now_playing(now));
         let played = now.playing || now.position_ms > 0;
 
+        // The player is observed every UI frame. Avoid cloning the strings
+        // and allocating a new Arc until the URI changes or metadata fills in.
         if let Some(observed) = &mut self.observed
-            && observed.track.uri == next.uri
+            && observed.track.uri == now.uri
         {
             observed.played |= played;
-            let needs_refresh = (observed.track.title.is_empty() && !next.title.is_empty())
-                || (observed.track.subtitle.is_empty() && !next.subtitle.is_empty())
-                || (observed.track.duration_ms == 0 && next.duration_ms > 0)
-                || (observed.track.album_id.is_none() && next.album_id.is_some())
-                || (observed.track.artist_id.is_none() && next.artist_id.is_some());
+            let needs_refresh = (observed.track.title.is_empty() && !now.title.is_empty())
+                || (observed.track.subtitle.is_empty() && !now.subtitle.is_empty())
+                || (observed.track.duration_ms == 0 && now.duration_ms > 0)
+                || (observed.track.album_id.is_none() && now.album_id.is_some())
+                || (observed.track.artist_id.is_none()
+                    && now.artists.first().and_then(|artist| artist.id.as_ref()).is_some());
             if needs_refresh {
-                observed.track = next;
+                observed.track = Arc::new(PlaylistHistoryTrack::from_now_playing(now));
             }
             return false;
         }
 
+        let next = Arc::new(PlaylistHistoryTrack::from_now_playing(now));
         let added = if let Some(previous) = self.observed.take() {
             if previous.played {
                 self.entries.push_front(previous.track);
